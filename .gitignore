@@ -38,3 +38,6 @@ venv/
 *.zip
 *.tar.gz
 *.rar
+
+# VScode
+.vscode/
