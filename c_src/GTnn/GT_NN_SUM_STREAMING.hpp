@@ -5,11 +5,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <nlohmann/json.hpp>
+using json = nlohmann::json;
 
 using namespace std;
 using namespace std::chrono;
 using namespace Eigen;
-using json = nlohmann::json;
 
 
 namespace Eigen{ 

@@ -1,5 +1,5 @@
 # Group Testing for Accurate and Efficient Range-Based Near Neighbor Search for Plagiarism Detection
-### Authors : Harsh Shah, Kashish Mittal, Ajit Rajwade  
+### Authors : Harsh Shah, Kashish Mittal, Tejas Sharma, Ajit Rajwade
 (from Computer Science Department at Indian Institute of Technology Bombay)
 
 This code repository has official implementation of paper **Group Testing for Accurate and Efficient Range-Based Near Neighbor Search for Plagiarism Detection** accepted in *European Conference on Computer Vision ECCV 2024*. 

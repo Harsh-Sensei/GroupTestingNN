@@ -1,0 +1,444 @@
+#include <bits/stdc++.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+using namespace std;
+using namespace std::chrono;
+
+namespace GT {
+    class GroupTestingNN {
+        private:
+            size_t dim;
+            size_t N; 
+            size_t Nq;
+            vector<vector<double>> dataset;
+            vector<vector<double>> query_set;
+            vector<vector<double>> data_cum;
+            vector<vector<double>> query_cum;
+
+            string data_path, query_path, result_path;
+            float rho;
+
+            // analysis variable 
+            // vector<size_t> negPools;
+            size_t ntests;
+            double agg_qtime = 0;
+            double agg_gt_qtime = 0;
+            double mean_precision = 0;
+            double mean_recall = 0;
+
+        public:
+            const string algo_name = "DoubleGroupTestingSumEigen";
+            
+            class vector<vector<size_t>> search_res; 
+            class vector<vector<size_t>> gt_res; 
+
+            static string pathAppend(const string& p1, const string& p2);
+            bool extractMatrix(string filename, vector<vector<double>> &dataset, size_t max_rows);
+            void saveMatrix(string filename, vector<vector<double>>& mat);
+            void recursive_mkdir(const char *dir);
+            void createIndex(vector<vector<double>>& data_cum, vector<vector<double>>& matrix);
+            void precision_and_recall();
+            void check_file(ofstream &file);
+            double dot_product(vector<double> &a, vector<double> &b);
+
+            GroupTestingNN(string &data_path, string &query_path, string &result_path, string &dname, 
+                size_t N, size_t Nq, size_t dim, float rho);
+            bool load_data();
+            bool build_index();
+            bool save_index(const string &filename);
+            bool load_index(const string &filename);
+            void search_subspans(size_t start_data, size_t end_data, 
+                    size_t start_query, size_t end_query, double full_sim);
+            void search(size_t batch_size = 0); // 0 means one batch all queries
+            void search(vector<vector<double>> &query_set_new, size_t batch_size = 0);
+            void exhaustive_search();
+            void exhaustive_search(vector<vector<double>> &query_set_new);
+            void save_results(); 
+    };
+};
+
+string GT::GroupTestingNN::pathAppend(const string& p1, const string& p2) {
+
+    char sep = '/';
+    string tmp = p1;
+
+    #ifdef _WIN32
+    sep = '\\';
+    #endif
+
+    if (p1[p1.length()] != sep) { 
+        tmp += sep;
+        return(tmp + p2);
+    } else {
+        return(p1 + p2);
+    }           
+}
+ 
+bool GT::GroupTestingNN::extractMatrix(
+    string filename, vector<vector<double>> &matrix, size_t max_rows = -1) {
+    ifstream file;
+    string line;
+    size_t rnum = 0;
+    file.open(filename.c_str());
+    matrix.clear();
+
+    if(file.fail()) {
+        cout << "Couldn't open file : " << filename << endl;
+        return false;
+    } 
+    while (getline(file, line))
+    {
+        if(max_rows > 0 && rnum == max_rows) {
+            break;
+        }
+        istringstream level(line);
+        matrix.push_back(vector<double>());
+
+        string value;
+        while (getline(level, value, ',')) {
+            double num = stod(value);
+            matrix.back().push_back(num);
+        }
+        rnum++;
+    }
+    file.close();
+
+    return true;
+}
+
+void GT::GroupTestingNN::saveMatrix(
+    string filename, vector<vector<double>>& matrix) {
+    ofstream file;
+    file.open(filename.c_str());
+    if(file.fail())
+    {
+        cout << "Couldn't open file : " << filename << endl;
+        exit(1);
+    }
+    for (auto &row : matrix) {
+        for (auto &val : row) {
+            file << val << ",";
+        }
+        file << endl;
+    }
+    return;
+}
+
+void GT::GroupTestingNN::recursive_mkdir(const char *dir) {
+    char tmp[256];
+    char *p = NULL;
+    size_t len;
+
+    snprintf(tmp, sizeof(tmp),"%s",dir);
+    len = strlen(tmp);
+    if (tmp[len - 1] == '/') {
+        tmp[len - 1] = 0;
+    }
+    for (p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = 0;
+            mkdir(tmp, S_IRWXU);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, S_IRWXU);
+}
+
+void GT::GroupTestingNN::createIndex(
+        vector<vector<double>>& data_cum, vector<vector<double>>& dataset) {
+    data_cum.resize(dataset.size(), vector<double>(dim, 0));
+    for (size_t j = 0; j < this->dim; j++) {
+        data_cum[0][j] = dataset[0][j];
+    }
+    for (size_t i = 1; i < dataset.size(); i++) {
+        for (size_t j = 0; j < this->dim; j++) {
+            data_cum[i][j] = data_cum[i-1][j] + dataset[i][j];
+        }
+    }
+}
+
+void GT::GroupTestingNN::precision_and_recall() {
+    cout << "Calculating precision and recall " <<endl;
+    mean_precision = 0;
+    mean_recall = 0;
+
+    for(size_t i=0; i<this->gt_res.size(); i++) {
+        unordered_set<size_t> truthSet(
+                this->gt_res[i].begin(), this->gt_res[i].end());
+        size_t truePositives = 0;
+
+        for (const auto& pred : this->search_res[i]) {
+            if (truthSet.find(pred) != truthSet.end()) {
+                truePositives++;
+            }
+        }
+        mean_precision += this->search_res[i].size() > 0 ? (
+                static_cast<double>(truePositives) / this->search_res[i].size()) : 1.0;
+        mean_recall += this->gt_res[i].size() > 0 ? (
+                static_cast<double>(truePositives) / this->gt_res[i].size()) : 1.0;
+    }
+    mean_precision /= this->gt_res.size();
+    mean_recall /= this->gt_res.size();
+    return;
+}
+
+void GT::GroupTestingNN::check_file(ofstream &file) {
+    if(file.fail())
+    {
+        cout << "Unable to open file" << endl;
+        exit(1);
+    }
+}
+
+double GT::GroupTestingNN::dot_product(vector<double> &a, vector<double> &b) {
+    double sum = 0;
+    for (size_t i = 0; i < this->dim; i++) {
+        sum += a[i] * b[i];
+    }
+    return sum;
+}
+
+GT::GroupTestingNN::GroupTestingNN(
+    string &data_path, string &query_path, string &result_path, string &dname, 
+    size_t N, size_t Nq, size_t dim, float rho) {
+    this->data_path = data_path;
+    this->query_path = query_path;
+    this->rho = rho;
+    this->N = N;
+    this->Nq = Nq;
+    this->dim = dim;
+
+    this->result_path = this->pathAppend(this->pathAppend(result_path, this->algo_name), 
+            dname + "_rho" + to_string(this->rho));
+    struct stat st = {0};
+    if (stat((this->result_path).c_str(), &st) == -1) {
+        recursive_mkdir((this->result_path).c_str());
+    }
+}
+
+bool GT::GroupTestingNN::load_data() {
+    bool is_loaded = this->extractMatrix(
+            this->data_path, this->dataset, this->N);
+    is_loaded = is_loaded && this->extractMatrix(
+            this->query_path, this->query_set, this->Nq);
+    return is_loaded;
+}
+
+bool GT::GroupTestingNN::build_index() {
+    this->createIndex(this->data_cum, this->dataset);
+    this->createIndex(this->query_cum, this->query_set);
+    return true; 
+}
+
+void GT::GroupTestingNN::search_subspans(
+    size_t start_data, size_t end_data, size_t start_query, size_t end_query, double full_sim) {
+    if (full_sim < rho) {
+        return;
+    }
+    if (start_data == end_data && start_query == end_query) {
+        this->search_res[start_query].push_back(start_data);
+        return;
+    }
+    this->ntests++;
+    size_t mid_data = (start_data + end_data + 1) / 2;
+    size_t mid_query = (start_query + end_query + 1) / 2;
+
+    if (start_data == end_data) 
+    {
+        double half_sim = this->dot_product(
+                this->data_cum[start_data], this->query_cum[end_query]);
+        half_sim -= this->dot_product(
+                this->data_cum[start_data], this->query_cum[mid_query-1]);
+        half_sim -= (start_data == 0) ? 0 : this->dot_product(
+                this->data_cum[start_data-1], this->query_cum[end_query]);
+        half_sim += (start_data == 0) ? 0 :this->dot_product(
+                this->data_cum[start_data-1], this->query_cum[mid_query-1]);
+
+        this->search_subspans(start_data, end_data, mid_query, end_query, half_sim);
+        this->search_subspans(start_data, end_data, start_query, mid_query-1, full_sim - half_sim);
+    }
+    if (start_query == end_query) 
+    {
+        double half_sim = this->dot_product(
+                this->data_cum[end_data], this->query_cum[start_query]);
+        half_sim -= this->dot_product(
+                this->data_cum[mid_data-1], this->query_cum[start_query]);
+        half_sim -= (start_query == 0) ? 0 : this->dot_product(
+                this->data_cum[end_data], this->query_cum[start_query-1]);
+        half_sim += (start_query == 0) ? 0 : this->dot_product(
+                this->data_cum[mid_data-1], this->query_cum[start_query-1]);
+
+        this->search_subspans(mid_data, end_data, start_query, end_query, half_sim);
+        this->search_subspans(start_data, mid_data-1, start_query, end_query, full_sim - half_sim);
+    }
+    
+    double third_sim = this->dot_product(
+            this->data_cum[end_data], this->query_cum[end_query]);
+    third_sim -= this->dot_product(
+            this->data_cum[mid_data-1], this->query_cum[end_query]);
+    third_sim -= this->dot_product(
+            this->data_cum[end_data], this->query_cum[mid_query-1]);
+    third_sim += this->dot_product(
+            this->data_cum[mid_data-1], this->query_cum[mid_query-1]);
+
+    double half_sim = this->dot_product(
+            this->data_cum[mid_data-1], this->query_cum[end_query]);
+    half_sim -= this->dot_product(
+            this->data_cum[mid_data-1], this->query_cum[mid_query-1]);
+    half_sim -= (start_data == 0) ? 0 : this->dot_product(
+            this->data_cum[start_data-1], this->query_cum[end_query]);
+    half_sim += (start_data == 0 || start_query == 0) ? 0 : this->dot_product(
+            this->data_cum[start_data-1], this->query_cum[start_query-1]);
+
+    double quart_sim = this->dot_product(
+            this->data_cum[mid_data-1], this->query_cum[end_query]);
+    quart_sim -= this->dot_product(
+            this->data_cum[mid_data-1], this->query_cum[mid_query-1]);
+    quart_sim -= (start_data == 0) ? 0 : this->dot_product(
+            this->data_cum[start_data-1], this->query_cum[end_query]);
+    quart_sim += (start_data == 0) ? 0 : this->dot_product(
+            this->data_cum[start_data-1], this->query_cum[mid_query-1]);
+
+    this->search_subspans(mid_data, end_data, mid_query, end_query, third_sim);
+    this->search_subspans(start_data, mid_data-1, mid_query, end_query, quart_sim);
+    this->search_subspans(mid_data, end_data, start_query, mid_query-1, full_sim - half_sim - third_sim);
+    this->search_subspans(start_data, mid_data-1, start_query, mid_query-1, half_sim - quart_sim);
+}
+
+void GT::GroupTestingNN::search(size_t batch_size) {
+    if (batch_size == 0) batch_size = this->Nq;
+    this->search_res.resize(this->Nq, vector<size_t>());
+    this->ntests = 0;
+
+    for (size_t sq = 0; sq < this->Nq; sq += batch_size) {
+        auto start = high_resolution_clock::now();
+        size_t eq = min(sq + batch_size - 1, this->Nq - 1);
+
+        this->search_subspans(0, this->N - 1, sq, eq, 
+                this->dot_product(this->data_cum[this->N - 1], this->query_cum[eq]) -
+                (sq == 0) ? 0 : this->dot_product(
+                this->data_cum[this->N - 1], this->query_cum[sq - 1]));
+
+        auto stop = high_resolution_clock::now();
+        auto duration = duration_cast<microseconds>(stop - start);
+        this->agg_qtime += duration.count();
+    }
+}
+
+void GT::GroupTestingNN::search(vector<vector<double>> &query_set_new, size_t batch_size) {
+    size_t Nq = query_set_new.size();
+    if (batch_size == 0) batch_size = Nq;
+    this->search_res.resize(Nq, vector<size_t>());
+    this->createIndex(this->query_cum, query_set_new);
+    this->ntests = 0;
+
+    for (size_t sq = 0; sq < Nq; sq += batch_size) {
+        auto start = high_resolution_clock::now();
+        size_t eq = min(sq + batch_size - 1, Nq - 1);
+
+        this->search_subspans(0, this->N - 1, sq, eq, 
+                this->dot_product(this->data_cum[this->N - 1], this->query_cum[eq]) -
+                (sq == 0) ? 0 : this->dot_product(
+                this->data_cum[this->N - 1], this->query_cum[sq - 1]));
+
+        auto stop = high_resolution_clock::now();
+        auto duration = duration_cast<microseconds>(stop - start);
+        this->agg_qtime += duration.count();
+    }
+    this->createIndex(this->query_cum, this->query_set); 
+    // restore the original query. comment above if not needed.
+}
+
+void GT::GroupTestingNN::exhaustive_search() {
+    this->gt_res.resize(this->Nq, vector<size_t>());
+    double sim = 0;
+    for (size_t i = 0; i < this->Nq; i++)
+    {
+        cout << "Query idx : " << i << endl;
+        auto start = high_resolution_clock::now();
+        for (size_t row = 0; row < this->N; row++)
+        {
+            sim = this->dot_product(this->dataset[row], this->query_set[i]);
+            if (sim >= this->rho)
+            {
+                this->gt_res[i].push_back(row);
+            }
+        }
+        auto stop = high_resolution_clock::now();
+        auto duration = duration_cast<milliseconds>(stop - start);
+        agg_gt_qtime += duration.count();
+    }
+}
+
+void GT::GroupTestingNN::exhaustive_search(vector<vector<double>> &query_set_new) {
+    size_t Nq = query_set_new.size();
+    this->gt_res.resize(Nq, vector<size_t>());
+    double sim = 0;
+    for (size_t i = 0; i < Nq; i++)
+    {
+        cout << "Query idx : " << i << endl;
+        auto start = high_resolution_clock::now();
+        for (size_t row = 0; row < this->N; row++)
+        {
+            sim = this->dot_product(this->dataset[row], query_set_new[i]);
+            if (sim >= this->rho) {
+                this->gt_res[i].push_back(row);
+            }
+        }
+        auto stop = high_resolution_clock::now();
+        auto duration = duration_cast<milliseconds>(stop - start);
+        agg_gt_qtime += duration.count();
+    }
+}
+
+void GT::GroupTestingNN::save_results() {
+    this->precision_and_recall();
+    ofstream fresults, faggregates, fgroundtruth;
+    fresults.open(this->pathAppend(this->result_path, string("results.txt")));
+    check_file(fresults);
+
+    fgroundtruth.open(this->pathAppend(this->result_path, string("ground_truth.txt")));
+    check_file(fgroundtruth);
+    
+    faggregates.open(this->pathAppend(this->result_path, string("agg.txt")));
+    check_file(faggregates);
+
+    for (size_t i = 0; i < this->Nq; i++) {   
+        for (size_t p = 0;  p < this->search_res[i].size(); p++) 
+        {
+            if (p != this->search_res[i].size() - 1) {
+                fresults << this->search_res[i][p] << " , " ;
+            } else {
+                fresults << this->search_res[i][p] << endl;
+            }
+        }
+    }
+
+    for (size_t i = 0; i < this->Nq; i++) {   
+        for (size_t p = 0;  p < this->gt_res[i].size(); p++)
+        {
+            if (p != this->gt_res[i].size() - 1) {
+                fgroundtruth << this->gt_res[i][p] << " , " ;
+            }
+            else {
+                fgroundtruth << this->gt_res[i][p] << endl;
+            }
+        }
+    }
+
+    // Dumping aggregates
+    faggregates << "Algorithm : " << this->algo_name << endl;
+    faggregates << "Avgerage pool search query time : " << this->agg_qtime/this->Nq << endl;
+    faggregates << "Avgerage exhaustive search query time : " << this->agg_gt_qtime/this->Nq << endl;
+    faggregates << "Average precision : " << this->mean_precision << endl;
+    faggregates << "Average recall : " << this->mean_recall << endl;
+    faggregates << "Number of dot products : " << this->ntests << endl;
+    faggregates << "Number of neg pools : " ;
+
+    // Safe close
+    fresults.close();
+    faggregates.close();
+    fgroundtruth.close();
+}  

@@ -365,7 +365,7 @@ void GT::GroupTestingNN::save_results()
     fgroundtruth.open(this->pathAppend(this->result_path, string("ground_truth.txt")));
     check_file(fgroundtruth);
     
-    faggregates.open(this->pathAppend(this->result_path, string("agg.txt")));
+    faggregates.open(this->pathAppend(this->result_path, string("agg.txt")), ios::app);
     check_file(faggregates);
 
     for (unsigned int i = 0; i < this->Nq; i++)

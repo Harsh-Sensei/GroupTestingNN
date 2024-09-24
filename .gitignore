@@ -2,6 +2,8 @@
 logs/
 *.log
 *.log.*
+c_src/test/
+c_src/nohup.out
 
 # OS generated files
 .DS_Store
@@ -38,3 +40,9 @@ venv/
 *.zip
 *.tar.gz
 *.rar
+
+# VScode
+.vscode/
+
+# Results
+c_src/results/
